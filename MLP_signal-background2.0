@@ -1,0 +1,271 @@
+
+# Load google drive
+ 
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import math
+from google.colab import drive
+drive.mount('/content/gdrive', force_remount=True)
+data_dir = '/content/gdrive/My Drive/Colab Notebooks/Data/MyAnalysis/'
+
+
+# Load specific .csv datafiles which are in specific google drive directories and show \
+some information about these .csv files
+
+processNames = ["Sig","ZZ","WZ","WW","Top","Dy","VVV"]
+data = []  
+
+for process_i in range(len(processNames)):
+    print(processNames[process_i]+'/'+processNames[process_i]+'3.0.csv')
+    data.append(pd.read_csv(data_dir+processNames[process_i]+'/'+processNames[process_i]+'3.0.csv'))
+    print("process: ",processNames[process_i]," dataLenght ",len(data[process_i]))
+
+# This part of the code implement the kinematical cuts and the commented part just below \
+the for loop is used separately from the uncommented one in order to measure the effect
+of the last cut (met_pt > 150)
+
+for process_i in range(len(data)):
+  '''
+  print("processName :",processNames[process_i])
+  print("processL ",data[process_i]['total_weight'].sum())
+  data[process_i] = data[process_i][data[process_i]['dijet_Mjj'] > 200]
+  print("processL1 ",data[process_i]['total_weight'].sum())
+  data[process_i] = data[process_i][data[process_i]['dijet_abs_dEta'] > 1.5]
+  print("processL2 ",data[process_i]['total_weight'].sum())
+  data[process_i] = data[process_i][(data[process_i]['lep_category'] == 1) | (data[process_i]['lep_category'] == 3)]
+  print("processL3 ",data[process_i]['total_weight'].sum())
+  data[process_i] = data[process_i][data[process_i]['ngood_bjets'] <= 1]
+  print("processL4 ",data[process_i]['total_weight'].sum())
+  data[process_i] = data[process_i][(81 <data[process_i]['Z_mass']) & (data[process_i]['Z_mass'] < 101)]
+  '''
+  print("processL5 ",data[process_i]['total_weight'].sum())
+  data[process_i] = data[process_i][150 <data[process_i]['met_pt']]
+  print("processL6 ",data[process_i]['total_weight'].sum())
+  #input("wait")
+
+bkg = pd.DataFrame()
+sig = pd.DataFrame()
+firstDataFrame = True
+for process_i in range(len(data)):
+  if processNames[process_i] != 'Sig':
+    if not firstDataFrame:
+      bkg = pd.concat([bkg,data[process_i]])
+    else:
+      firstDataFrame = False
+      bkg = data[process_i]
+  else:
+    sig = data[process_i] 
+
+
+# this part of the code implements specific corrections in the weights of concatenated datafra \
+me in order to the training MLP to give same importance to signal and background events, despite
+the background events occuring in a larger portion
+
+
+sig['isSignal'] = np.ones(len(sig)) 
+bkg['isSignal'] = np.zeros(len(bkg))
+#sig['total_weight'] = np.ones(len(sig))
+#bkg['total_weight'] = np.ones(len(bkg)) 
+sig = pd.DataFrame(sig,columns=['dijet_abs_dEta','lead_jet_eta','trail_jet_eta','lead_jet_phi','trail_jet_phi','dijet_Mjj','met_pt','met_phi','leading_lep_eta','trailing_lep_eta','lead_jet_pt','trail_jet_pt','leading_lep_pt','trailing_lep_pt','delta_phi_j_met','delta_phi_ZMet','leading_lep_phi','trailing_lep_phi','Z_mass','ngood_bjets','ngood_jets','total_weight','isSignal'])
+sigSumWeight = sig['total_weight'].sum(axis=0)
+sig['total_weight'] = sig['total_weight'] / sigSumWeight
+bkg = pd.DataFrame(bkg,columns=['dijet_abs_dEta','lead_jet_eta','trail_jet_eta','lead_jet_phi','trail_jet_phi','dijet_Mjj','met_pt','met_phi','leading_lep_eta','trailing_lep_eta','lead_jet_pt','trail_jet_pt','leading_lep_pt','trailing_lep_pt','delta_phi_j_met','delta_phi_ZMet','leading_lep_phi','trailing_lep_phi','Z_mass','ngood_bjets','ngood_jets','total_weight','isSignal'])
+bkgSumWeight = bkg['total_weight'].sum(axis=0)
+bkg['total_weight'] = bkg['total_weight'] / bkgSumWeight
+df_all = pd.concat([sig,bkg])
+
+
+# this part of the code creates the MLP model and set the optimizer type and it's learning rate
+
+
+
+from keras.models import Sequential, Model
+from keras.optimizers import SGD, Adam, Adadelta
+from keras.layers import Input, Activation, Dense, Dropout
+from keras.utils import np_utils
+from keras.layers import Lambda , concatenate
+from keras import backend
+ 
+ 
+NINPUT = 21
+ 
+input  = Input(shape=(NINPUT,), name = 'input')
+hidden_1 = Dense(10, name = 'hidden_1', kernel_initializer='normal', activation='relu')(input)
+hidden_2 = Dense(30, name = 'hidden_2', kernel_initializer='normal', activation='relu')(hidden_1)
+hidden_3 = Dense(10, name = 'hidden_4', kernel_initializer='normal', activation='relu')(hidden_2)
+output  = Dense(1 , name = 'output', kernel_initializer='normal', activation='sigmoid')(hidden_3)
+ 
+model = Model(inputs=input, outputs=output)
+ 
+optim = Adam(lr=0.00005)
+model.compile(optimizer=optim, loss='binary_crossentropy', metrics=['accuracy'])
+model.summary()
+
+
+# this part of the code implements training and test split. I must say that I didn't implement \
+a validation split because of very few entrances in the .csv files when met_pt >150 cut is \ 
+implemented
+
+
+dataset = df_all.values
+np.random.shuffle(dataset)
+ 
+X = dataset[:,:NINPUT+1]
+Y = dataset[:,-1]
+ 
+from sklearn.model_selection import train_test_split
+X_train_val, X_test, Y_train_val, Y_test = train_test_split(X, Y, test_size=0.5, shuffle=True)
+
+
+# this part of the code in fact performs the training. The number of epochs and mini-batch size \
+is just figurative
+
+ 
+# Number of training epochs
+nepochs=400
+# Batch size
+batch=100
+ 
+ 
+# Train classifier
+history = model.fit(X_train_val[:,0:NINPUT], 
+                    Y_train_val, 
+                    epochs=nepochs, 
+                    batch_size=batch,
+                    verbose=1, # switch to 1 for more verbosity 
+                    validation_split=0.0, sample_weight = X_train_val[:,NINPUT])
+
+
+
+# This part of the code plots ROC curve corrected with weights and threshold histogram (which is not corrected with weights) \
+as well as loss per epoch graph and training accuracy per epoch graph
+
+
+import matplotlib.pyplot as plt
+
+%matplotlib inline
+plt.style.use('default')
+plt.figure(figsize=(15,10))
+ 
+train_loss=history.history['loss'][399]
+#val_loss=history.history['val_loss'][]
+train_acc=history.history['accuracy'][399]
+#val_acc=history.history['val_accuracy'][39]
+ 
+print("train loss: ",train_loss);
+#print("val loss: ",val_loss);
+print("train accuracy: ",train_acc);
+#print("val accuracy: ",val_acc);
+ 
+ 
+# plot loss vs epoch
+ax = plt.subplot(2, 2, 1)
+ax.plot(history.history['loss'], label='loss')
+#ax.plot(history.history['val_loss'], label='val_loss')
+#ax.set_ylim([0, 1])
+ax.legend(loc="upper right")
+ax.set_xlabel('Epoch')
+ax.set_ylabel('Loss')
+ 
+# plot accuracy vs epoch
+ax = plt.subplot(2, 2, 2)
+ax.plot(history.history['accuracy'], label='accuracy')
+#ax.plot(history.history['val_accuracy'], label='val_accuracy')
+ax.set_ylim([0, 1.0])
+ax.legend(loc="upper left")
+ax.set_xlabel('Epoch')
+ax.set_ylabel('Accuracy')
+ 
+# Plot ROC
+Y_predict = model.predict(X_test[:,0:NINPUT])
+Y_predict = np.squeeze(Y_predict)
+print(Y_predict.shape)
+print(Y_test.shape)
+from sklearn.metrics import roc_curve, auc
+#print(X_test[:,NINPUT])
+#print(len(X_test[:,NINPUT]))
+the_weights = np.array(X_test[:,NINPUT])
+#print(the_weights)
+#print(len(the_weights))
+#input("wait")
+
+ 
+for i in range(len(Y_test)):
+  if Y_test[i] == 1:
+    the_weights[i] *= sigSumWeight
+  else:
+    the_weights[i] *= bkgSumWeight
+ 
+fpr, tpr, thresholds = roc_curve(Y_test, Y_predict,sample_weight=the_weights)
+auc = 0.0
+for i in range(len(fpr)-1):
+  auc+=((fpr[i+1] - fpr[i]) * tpr[i])
+ax = plt.subplot(2, 2, 3)
+ax.plot(fpr, tpr, lw=2, color='cyan', label='auc = %.3f' % (auc))
+ax.plot([0, 1], [0, 1], linestyle='--', lw=2, color='k', label='random chance')
+ax.set_xlim([0, 1.0])
+ax.set_ylim([0, 1.0])
+ax.set_xlabel('False Positive Rate(FPR)')
+ax.set_ylabel('True Positive Rate(TPR)')
+ax.set_title('Receiver Operating Curve(ROC)')
+ax.legend(loc="lower right")
+ 
+# Plot DNN output 
+ax = plt.subplot(2, 2, 4)
+X = np.linspace(0.0, 1.0, 100)
+ax.hist(Y_predict, bins=X, label='sig',histtype='step')
+ax.hist(Y_test, bins=X, label='total',histtype='step')
+ 
+ax.set_xlabel('DNN Output')
+ 
+plt.show()
+
+
+# this part of the code was used to get the signal to background ratios and significance values for a wide range of thresholds
+
+
+sigEv = the_weights[Y_test == 1].sum()
+backEv = the_weights[Y_test == 0].sum()
+Ns = sigEv * tpr[::-1]
+Nb = backEv * fpr[::-1]
+Nbs = np.sqrt(backEv * fpr[::-1])
+#eff = tpr[::-1][np.searchsorted(thresholds[::-1],0.998)]
+Nsa = Ns[np.searchsorted(thresholds[::-1],0.25)]
+Nba = Nb[np.searchsorted(thresholds[::-1],0.25)]
+Nbsa = Nbs[np.searchsorted(thresholds[::-1],0.25)]
+ratio = Nsa/(Nsa+Nba)
+print(Nsa)
+print(Nba)
+print("{:e}".format(Nsa/Nba))
+print("{:e}".format(Nsa/Nbsa))
+
+
+# this part of the code is used to portray the efficiency X purity curve and serves as a cross-check for the last few lines (code cell in colab)
+
+import sklearn as sk
+
+precision, recall, tresholds  = sk.metrics.precision_recall_curve(Y_test,Y_predict,sample_weight=the_weights)
+
+#print(the_weights)
+#print(Y_test
+#print(Y_predict)
+tresholds = np.concatenate([np.array([0]),tresholds])
+print((precision*recall).max())
+plt.figure(figsize=(30,10))
+plt.xlabel("tresholds or efficiency values")
+plt.yticks(np.arange(0,1.025,0.025))
+plt.xticks(np.arange(0,1.02,0.02))
+plt.plot(recall,precision, label = 'efficiency X purity')
+#plt.plot(tresholds,recall*precision, label = 'tresholds X pur * eff')
+plt.grid()
+plt.legend()
+plt.show()
+
+
+
+
+
+
+
+
